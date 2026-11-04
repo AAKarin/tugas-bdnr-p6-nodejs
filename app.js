@@ -133,6 +133,7 @@ app.get('/laporan/kategori', async (req, res) => {
 // 2. KONEKSI & OPERASI FIREBASE FIRESTORE (LATIHAN 4)
 // ==============================================================================
 let firestoreCol;
+let firestoreBukuCol;
 try {
     const credPath = process.env.FIREBASE_CREDENTIALS 
         ? path.resolve(process.env.FIREBASE_CREDENTIALS) 
@@ -146,7 +147,8 @@ try {
 
     const firestoreDb = getFirestore();
     firestoreCol = firestoreDb.collection('produk');
-    console.log('✅ Terhubung ke Firebase Firestore (collection: produk)');
+    firestoreBukuCol = firestoreDb.collection('buku');
+    console.log('✅ Terhubung ke Firebase Firestore (collection: produk & buku)');
 } catch (err) {
     console.error('❌ Gagal inisialisasi Firebase Admin SDK:', err.message);
 }
@@ -254,6 +256,193 @@ app.get('/firestore/ringkasan', async (req, res) => {
             totalProduk,
             totalStok,
             rataHarga: totalProduk > 0 ? Math.round(totalHarga / totalProduk) : 0
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+// ==============================================================================
+// 3. TUGAS 2 (Slide 29): API PERPUSTAKAAN BUKU (FIRESTORE + NODE.JS)
+// Fitur: CRUD, Filter, arrayUnion, dan Laporan per Kategori
+// ==============================================================================
+
+// GET /firestore/buku/laporan/kategori (Fitur Laporan per Kategori)
+app.get('/firestore/buku/laporan/kategori', async (req, res) => {
+    try {
+        const snap = await firestoreBukuCol.get();
+        const grupKategori = {};
+
+        snap.docs.forEach(doc => {
+            const data = doc.data();
+            const kat = data.kategori || 'Tanpa Kategori';
+
+            if (!grupKategori[kat]) {
+                grupKategori[kat] = {
+                    kategori: kat,
+                    totalJudul: 0,
+                    totalStok: 0,
+                    daftarJudul: []
+                };
+            }
+
+            grupKategori[kat].totalJudul += 1;
+            grupKategori[kat].totalStok += Number(data.stok || 0);
+            grupKategori[kat].daftarJudul.push(data.judul || doc.id);
+        });
+
+        res.json({
+            judul_laporan: 'Laporan Perpustakaan Buku per Kategori (Firestore)',
+            waktu_generate: new Date().toISOString(),
+            data: Object.values(grupKategori)
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// GET /firestore/buku (CRUD Read All + Fitur Filter ?kategori=...)
+app.get('/firestore/buku', async (req, res) => {
+    try {
+        let q = firestoreBukuCol;
+        if (req.query.kategori) {
+            q = q.where('kategori', '==', req.query.kategori);
+        }
+        const snap = await q.get();
+        res.json(snap.docs.map(formatDoc));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// GET /firestore/buku/:id (CRUD Read Detail)
+app.get('/firestore/buku/:id', async (req, res) => {
+    try {
+        const doc = await firestoreBukuCol.doc(req.params.id).get();
+        if (!doc.exists) {
+            return res.status(404).json({ message: 'Buku tidak ditemukan di Firestore' });
+        }
+        res.json(formatDoc(doc));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST /firestore/buku (CRUD Create)
+app.post('/firestore/buku', async (req, res) => {
+    try {
+        const data = req.body;
+        const ref = await firestoreBukuCol.add({
+            judul: data.judul,
+            pengarang: data.pengarang,
+            kategori: data.kategori,
+            tahun: Number(data.tahun || new Date().getFullYear()),
+            stok: Number(data.stok || 0),
+            peminjam: Array.isArray(data.peminjam) ? data.peminjam : [],
+            ulasan: Array.isArray(data.ulasan) ? data.ulasan : [],
+            dibuat: FieldValue.serverTimestamp()
+        });
+
+        res.status(201).json({
+            id: ref.id,
+            message: 'Buku berhasil ditambahkan ke Firestore'
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// PUT /firestore/buku/:id (CRUD Update dengan merge: true)
+app.put('/firestore/buku/:id', async (req, res) => {
+    try {
+        const docRef = firestoreBukuCol.doc(req.params.id);
+        const doc = await docRef.get();
+        if (!doc.exists) {
+            return res.status(404).json({ message: 'Buku tidak ditemukan di Firestore' });
+        }
+
+        const perubahan = { ...req.body };
+        delete perubahan.id;
+        delete perubahan._id;
+        if (perubahan.stok !== undefined) perubahan.stok = Number(perubahan.stok);
+        if (perubahan.tahun !== undefined) perubahan.tahun = Number(perubahan.tahun);
+
+        await docRef.set(perubahan, { merge: true });
+        res.json({ message: 'Data buku berhasil diperbarui di Firestore' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// DELETE /firestore/buku/:id (CRUD Delete)
+app.delete('/firestore/buku/:id', async (req, res) => {
+    try {
+        const docRef = firestoreBukuCol.doc(req.params.id);
+        const doc = await docRef.get();
+        if (!doc.exists) {
+            return res.status(404).json({ message: 'Buku tidak ditemukan di Firestore' });
+        }
+
+        await docRef.delete();
+        res.json({ message: 'Buku berhasil dihapus dari Firestore' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST /firestore/buku/:id/peminjam (Fitur arrayUnion: menambah data peminjam tanpa duplikasi)
+app.post('/firestore/buku/:id/peminjam', async (req, res) => {
+    try {
+        const docRef = firestoreBukuCol.doc(req.params.id);
+        const doc = await docRef.get();
+        if (!doc.exists) {
+            return res.status(404).json({ message: 'Buku tidak ditemukan di Firestore' });
+        }
+
+        const dataPeminjam = {
+            nama: req.body.nama,
+            tanggal_pinjam: req.body.tanggal_pinjam || new Date().toISOString(),
+            durasi_hari: Number(req.body.durasi_hari || 7)
+        };
+
+        // Menambahkan elemen ke array dengan atomic operator arrayUnion
+        await docRef.update({
+            peminjam: FieldValue.arrayUnion(dataPeminjam)
+        });
+
+        res.json({
+            message: 'Peminjam berhasil ditambahkan via FieldValue.arrayUnion',
+            data_peminjam: dataPeminjam
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST /firestore/buku/:id/ulasan (Fitur arrayUnion: menambah ulasan tanpa duplikasi)
+app.post('/firestore/buku/:id/ulasan', async (req, res) => {
+    try {
+        const docRef = firestoreBukuCol.doc(req.params.id);
+        const doc = await docRef.get();
+        if (!doc.exists) {
+            return res.status(404).json({ message: 'Buku tidak ditemukan di Firestore' });
+        }
+
+        const dataUlasan = {
+            pembaca: req.body.pembaca,
+            rating: Number(req.body.rating || 5),
+            komentar: req.body.komentar,
+            tanggal: new Date().toISOString()
+        };
+
+        await docRef.update({
+            ulasan: FieldValue.arrayUnion(dataUlasan)
+        });
+
+        res.json({
+            message: 'Ulasan berhasil ditambahkan via FieldValue.arrayUnion',
+            data_ulasan: dataUlasan
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
